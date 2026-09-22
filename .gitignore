@@ -1,0 +1,99 @@
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[oc]
+*$py.class
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+
+# ─── Virtual environments / uv ───────────────────────────────────────────────
+.venv/
+venv/
+env/
+.uv/
+# uv.lock and .python-version are committed on purpose.
+
+# ─── Test / lint / type-check caches ─────────────────────────────────────────
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# ─── Secrets & local config ──────────────────────────────────────────────────
+# Runtime config comes from AWS Secrets Manager (app/config.py); nothing
+# secret should ever land here, but block the usual local overrides.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+.aws/
+secrets.json
+
+# Ad-hoc editor/merge backups
+*.orig
+*.bak
+
+# ─── Terraform ───────────────────────────────────────────────────────────────
+# State lives in the S3 backend created by bootstrap.sh — never commit it.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+.terraformrc
+terraform.rc
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Variable files hold the API key and image URIs (see variable "api_key").
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# ─── Docker / local compose overrides ────────────────────────────────────────
+docker-compose.override.yml
+.docker/
+
+# ─── ML model & embedding caches (sentence-transformers / HF) ────────────────
+.cache/
+hf_cache/
+models/
+*.safetensors
+*.onnx
+
+# ─── PyRIT dashboard artifacts ───────────────────────────────────────────────
+# PyRIT writes scan memory/results locally; those are run output, not source.
+pyrit_dashboard/results/
+results/
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite3
+
+# ─── Generated reports & logs ────────────────────────────────────────────────
+# Reports are streamed from app/output.py (reportlab), not stored in-repo.
+*.pdf
+*.log
+logs/
+tmp/
+
+# ─── Editors & OS ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
