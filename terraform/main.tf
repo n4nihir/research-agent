@@ -58,18 +58,18 @@ variable "app_min_capacity" {
 }
 
 variable "app_max_capacity" {
-  description = "Maximum number of app ECS tasks for auto-scaling"
-  default     = 5
+  description = "Maximum number of app ECS tasks for auto-scaling. Fargate has no free tier, so this is capped low."
+  default     = 2
 }
 
 variable "app_cpu" {
-  description = "CPU units for app task (1024 = 1 vCPU)"
-  default     = "2048"
+  description = "CPU units for app task (1024 = 1 vCPU). 512 is the smallest that keeps sentence-transformers responsive."
+  default     = "512"
 }
 
 variable "app_memory" {
-  description = "Memory in MB for app task"
-  default     = "4096"
+  description = "Memory in MB for app task. all-MiniLM-L6-v2 + torch needs ~1GB resident; 2048 leaves headroom."
+  default     = "2048"
 }
 
 variable "db_instance_class" {
@@ -93,8 +93,8 @@ variable "redis_num_cache_nodes" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention in days"
-  default     = 7
+  description = "CloudWatch log retention in days. Kept short to stay inside the 5GB free allowance."
+  default     = 1
 }
 
 variable "cpu_scale_target" {
@@ -114,6 +114,32 @@ data "aws_availability_zones" "available" {}
 locals {
   azs          = slice(data.aws_availability_zones.available.names, 0, 2)
   https_enabled = var.acm_certificate_arn != ""
+
+  ecr_lifecycle_policy = jsonencode({
+    rules = [
+      {
+        rulePriority = 1
+        description  = "Expire untagged images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
+      },
+      {
+        rulePriority = 2
+        description  = "Keep only the 2 most recent tagged images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 2
+        }
+        action = { type = "expire" }
+      }
+    ]
+  })
 }
 
 # ─── VPC ──────────────────────────────────────────────────────────────────────
@@ -173,24 +199,9 @@ resource "aws_route_table_association" "private" {
 
 # ─── VPC Endpoints (replaces NAT gateway) ────────────────────────────────────
 
-resource "aws_vpc_endpoint" "ecr_dkr" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-}
-
-resource "aws_vpc_endpoint" "ecr_api" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-}
-
+# Interface endpoints for ECR/Secrets Manager/Bedrock/Logs were removed: they have
+# no free tier (~$7.30/mo each) and the ECS tasks run in public subnets, reaching
+# those services over the internet gateway instead. Only the free gateway endpoint remains.
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
@@ -198,45 +209,7 @@ resource "aws_vpc_endpoint" "s3" {
   route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
 }
 
-resource "aws_vpc_endpoint" "secretsmanager" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-}
-
-resource "aws_vpc_endpoint" "bedrock_runtime" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.bedrock-runtime"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-}
-
-resource "aws_vpc_endpoint" "cloudwatch_logs" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.${var.aws_region}.logs"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = aws_subnet.private[*].id
-  security_group_ids  = [aws_security_group.vpc_endpoints.id]
-  private_dns_enabled = true
-}
-
 # ─── Security Groups ──────────────────────────────────────────────────────────
-
-resource "aws_security_group" "vpc_endpoints" {
-  name   = "${var.project}-vpc-endpoints"
-  vpc_id = aws_vpc.main.id
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [aws_vpc.main.cidr_block]
-  }
-}
 
 resource "aws_security_group" "alb" {
   name   = "${var.project}-alb"
@@ -437,20 +410,23 @@ resource "aws_db_instance" "postgres" {
   engine                  = "postgres"
   engine_version          = "15.8"
   instance_class          = var.db_instance_class
+  # Free tier: 20GB gp2 on a single-AZ db.t3.micro. Storage autoscaling is NOT
+  # set, since a ceiling above 20GB is what trips FreeTierRestrictionError.
   allocated_storage       = 20
-  max_allocated_storage   = 100
+  storage_type            = "gp2"
   db_name                 = "researchdb"
   username                = "dbadmin"
   password                = random_password.db_password.result
   db_subnet_group_name    = aws_db_subnet_group.main.name
   vpc_security_group_ids  = [aws_security_group.rds.id]
   multi_az                = var.db_multi_az
-  deletion_protection     = false 
-  skip_final_snapshot     = false
-  final_snapshot_identifier = "${var.project}-postgres-final-snapshot"
-  backup_retention_period = 7
-  backup_window           = "03:00-04:00"
+  deletion_protection     = false
+  # No automated backups and no final snapshot: both consume paid snapshot
+  # storage and the final snapshot would also block `terraform destroy`.
+  skip_final_snapshot     = true
+  backup_retention_period = 0
   maintenance_window      = "sun:05:00-sun:06:00"
+  performance_insights_enabled = false
   tags                    = { Name = "${var.project}-postgres" }
 }
 
@@ -636,6 +612,9 @@ resource "aws_cloudwatch_log_group" "tensorzero" {
 
 resource "aws_secretsmanager_secret" "config" {
   name = "research-agent/config"
+  # Delete immediately on destroy instead of holding the name for a 30-day
+  # recovery window, which blocks the next apply from recreating it.
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "config" {
@@ -855,6 +834,24 @@ resource "aws_ecr_repository" "tensorzero" {
   image_tag_mutability = "MUTABLE"
   force_delete         = true
   image_scanning_configuration { scan_on_push = true }
+}
+
+# ECR free tier is 500MB/month of storage. These app images are large (torch +
+# sentence-transformers), so keep only the newest 2 of each and expire untagged
+# layers left behind by earlier pushes.
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+  policy     = local.ecr_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "pyrit" {
+  repository = aws_ecr_repository.pyrit.name
+  policy     = local.ecr_lifecycle_policy
+}
+
+resource "aws_ecr_lifecycle_policy" "tensorzero" {
+  repository = aws_ecr_repository.tensorzero.name
+  policy     = local.ecr_lifecycle_policy
 }
 
 # ─── EventBridge (weekly red team) ───────────────────────────────────────────
